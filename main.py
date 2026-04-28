@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
+# from langchain_ollama import ChatOllama
 from langchain_core.prompts import PromptTemplate
 load_dotenv()
 
@@ -27,8 +28,10 @@ Musk also founded tunneling startup The Boring Company and brain implant outfit 
         model="gemini-2.5-flash",
         temperature=0
     )
+    # llm = ChatOllama(model = "gemma3:270m", temperature=0)
     chain = summary_prompt_template | llm #LCEL(Langchain Expression Language) Creates a runnable object in which the output of one component is the input to the other component.
     response = chain.invoke(input={"information": information})
-    print(response.content)
+    print(response.content) #Return content from AImessage which contains a lot of details including content.
+    
 if __name__ == "__main__":
     main()
