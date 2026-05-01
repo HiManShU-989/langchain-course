@@ -30,7 +30,7 @@ Musk also founded tunneling startup The Boring Company and brain implant outfit 
     )
     # llm = ChatOllama(model = "gemma3:270m", temperature=0)
     chain = summary_prompt_template | llm #LCEL(Langchain Expression Language) Creates a runnable object in which the output of one component is the input to the other component.
-    response = chain.invoke(input={"information": information})
+    response = chain.invoke(input={"information": information})# Invokes the LLM chain with input as information, which is passed to the summary_prompt_template, and then the generated prompt is passed to the llm for processing. The response from the llm is stored in the response variable.
     print(response.content) #Return content from AImessage which contains a lot of details including content.
     
 if __name__ == "__main__":
