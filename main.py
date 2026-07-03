@@ -1,3 +1,5 @@
+import re
+import inspect
 from dotenv import load_dotenv
 load_dotenv() 
 import ollama
@@ -11,46 +13,7 @@ MODEL = "qwen3.5:latest"
 # The traceable decorator from langsmith allows us to easily create tools that can be called by the agent 
 # without having to write provider specific code. It also allows us to track the execution of the tools in the langsmith dashboard.
 
-tools_for_llm = [
-    {
-        "type": "function",
-        "function":{
-            "name": "get_product_price",
-            "description": "Look up the price of a product in the catalog.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "product": {
-                        "type": "string",
-                        "description": "The name of the product to look up e.g. 'laptop', 'headphones', 'keyboard'."
-                    }
-                },
-                "required": ["product"]
-            }
-        }
-    },
-    {
-       "type": "function",
-       "function": {
-           "name": "apply_discount",
-           "description": "Apply a discount to a price based on the discount tier and return the final price.",
-           "parameters": {
-               "type": "object",
-               "properties": {
-                   "price": {
-                       "type": "number",
-                       "description": "The original price of the product."
-                   },
-                   "discount_tier": {
-                       "type": "string",
-                       "description": "The discount tier to apply. Available tiers are 'bronze', 'silver', and 'gold'."
-                   }
-               },
-               "required": ["price", "discount_tier"]
-           }
-       } 
-    }
-] 
+
 @traceable(run_type = "tool")
 def get_product_price(product:str) -> float:
     """Look up the price of a product in the catalog.
@@ -78,6 +41,7 @@ def apply_discount(price:float, discount_tier:str) -> float:
     returns:
         The discounted price of the product.
     """
+    price = float(price)
     print(f"    >> Executing the apply_discount(price = {price}, discount_tier = '{discount_tier}')")
     discounts = {
         "silver": 12,
@@ -87,79 +51,114 @@ def apply_discount(price:float, discount_tier:str) -> float:
     discount_rate = discounts.get(discount_tier, 0.0)
     return round(price * (1 - discount_rate / 100), 2)
 
+tools = {
+    "get_product_price": get_product_price,
+    "apply_discount": apply_discount
+}
+
+def get_tool_descriptions(tools_dict):
+    descriptions = []
+    for tool_name, tool_function in tools_dict.items():
+        # __wrapped__ attribute is used to access the original function wrapped by the decorator.
+        original_function = getattr(tool_function, "__wrapped__", tool_function)
+        signature = inspect.signature(original_function)
+        docstring = inspect.getdoc(original_function) or ""
+        descriptions.append(f"{tool_name}{signature}- {docstring}")
+    return "\n".join(descriptions)
+
+tool_descriptions = get_tool_descriptions(tools)
+tool_names = ", ".join(tools.keys())
+
+
+react_prompt = f"""
+STRICT RULES — you must follow these exactly:
+1. NEVER guess or assume any product price. You MUST call get_product_price first to get the real price.
+2. Only call apply_discount AFTER you have received a price from get_product_price. Pass the exact price returned by get_product_price — do NOT pass a made-up number.
+3. NEVER calculate discounts yourself using math. Always use the apply_discount tool.
+4. If the user does not specify a discount tier, ask them which tier to use — do NOT assume one.
+
+Answer the following questions as best you can. You have access to the following tools:
+
+{tool_descriptions}
+
+Use the following format:
+
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action, as comma separated values
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+
+Begin!
+
+Question: {{question}}
+Thought:"""
 
 # Without langchain, we have to manually trace the LLM calls.
 @traceable(name="Ollama Chat", run_type = "llm")
-def ollama_chat_traced(messages):
-    return ollama.chat(model = MODEL, messages = messages, tools = tools_for_llm)
-
-
+def ollama_chat_traced(model, messages, options):
+    return ollama.chat(model = model, messages = messages, options = options)
 
 # _______AGENT LOOP _________
 @traceable(name = "Ollama agent loop")
 def run_agent(question: str):
-    tools_dict = {
-        "get_product_price": get_product_price,
-        "apply_discount": apply_discount
-    }
-    
-    # On using langchain, we don't have to worry about the prompt formatting or how to pass tool results back to the LLM.
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful shopping assistant."
-                      "You have access to a product catalog tool"
-                      "and a discount tool.\n\n"
-                      "STRICT RULES- you must follow these exactly:\n"
-                      "1. Never guess or assume any product price."
-                      "You must call get_product_price first to get the real price.\n"
-                      "2. Only call apply_discount AFTER you have received"
-                      "a price from get_product_price. Pass the exact price"
-                      "returned by get_product_price - do NOT pass a made-up number.\n"
-                      "3. NEVER calculate discount yourself using math."
-                      "Always use the apply_discount tool.\n"
-                      "4. If the user does not specify a discount tier,"
-                      "ask them which tier to use - do NOT assume one."
-        },
-        {
-            "role":"user",
-            "content":question
-        }
-    ]
+    print(f"Question: {question}")
+    print("="*60)
+    prompt = react_prompt.format(question=question)
+    scratchpad = ""
     
     for iteration in range(1,MAX_ITERATIONS + 1):
         print(f"--- Iteration {iteration} ---")
-        # Ollama.chat() directly instead of llm_with_tools.invoke()
-        response = ollama_chat_traced(messages=messages)
-        ai_message = response.message
-        tool_calls = ai_message.tool_calls
-        # if no tool calls means we have the final answer, break the loop and return the answer
-        if not tool_calls:
-            print(f"\n Final answer: {ai_message.content}")
-            return ai_message.content
+        full_prompt = prompt + scratchpad
+        response = ollama_chat_traced(
+            model = MODEL,
+            messages = [{"role":"user", "content":full_prompt}],
+            options = {"stop":["\nObservation"], "temperature": 0.0}
+        )
+        output = response.message.content
+        print(f"LLM Output:\n{output}")
         
-        #Process only first tool call- force one tool per iteration for simplicity
-        tool_call = tool_calls[0]
-        # Difference in attribute access method.
-        tool_name = tool_call.function.name
-        tool_args = tool_call.function.arguments
+        print(f"[Parsing] Looking for final answer in LLM output")
+        final_answer_match = re.search(r"Final Answer:\s*(.+)", output)
+        if final_answer_match:
+            final_answer = final_answer_match.group(1).strip()
+            print(f"[Parsed] Final Answer found: {final_answer}")
+            print("\n"+"="*60)
+            print(f"Final Answer: {final_answer}")
+            return final_answer
         
-        print(f" [Tool Selected]: {tool_name} with args: {tool_args} ")
+        # Parse tool calls from raw text using regex- fragile if LLM doesn't follow format.
+        print(f"[Parsing] Looking for tool calls in LLM output")
+        action_match = re.search(r"Action:\s*(.+)", output)
+        action_input_match = re.search(r"Action Input:\s*(.+)", output)
+       
+        if(not action_match or not action_input_match):
+           print(f"[Parsing] No tool calls found in LLM output. Stopping agent.")
+           break
         
-        tool_to_use = tools_dict.get(tool_name)
-        if tool_to_use is None:
-            raise ValueError(f"Tool {tool_name} not found in available tools.")
+        tool_name = action_match.group(1).strip()
+        tool_input_raw = action_input_match.group(1).strip()
         
-        # Direct function call instead of tool.invoke()
-        observation = tool_to_use(**tool_args)
-        print(f" [Tool Result]: {observation} \n")
+        print(f"  [Tool selected]: {tool_name} with args: {tool_input_raw}")
+        # Split comma separated args strip key= prefix if LLM outputs key=value format. Very fragile if LLM doesn't follow format.
+        raw_args = [x.strip() for x in tool_input_raw.split(",")]
+        args = [x.split("=",1)[-1].strip().strip("'\"") for x in raw_args]
         
-        messages.append(ai_message)
-        messages.append({
-            "role":"tool",
-            "content":str(observation)
-        })
+        print(f"[Tool Executing] {tool_name}({args})...")
+        
+        if tool_name not in tools:
+            observation = f"Error:Tool '{tool_name}' not found. Available tools: {list[str](tools.keys())}"
+        else:
+            observation = str(tools[tool_name](*args))
             
+        print(f" Tool Result: {observation}")
+        
+        # History is one growing string re-sent every iteration(replaces messages.append)
+        scratchpad += f"{output}\nObservation: {observation}\nThought:"
+       
     print("ERROR: Max iterations reached without a final answer.")
     return None
         
