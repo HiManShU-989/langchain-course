@@ -1,172 +1,134 @@
-import re
-import inspect
+import os
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+from operator import itemgetter
 from dotenv import load_dotenv
-load_dotenv() 
-import ollama
-from langsmith import traceable
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_pinecone import PineconeVectorStore
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
 
-MAX_ITERATIONS = 10
-MODEL = "qwen3.5:latest"
+load_dotenv()
 
-# Langcahin tool decorators allow us to easily create tools that can be called by the agent.
-# But using raw functions we have to write provider specific code to make them work with the agent.
-# The traceable decorator from langsmith allows us to easily create tools that can be called by the agent 
-# without having to write provider specific code. It also allows us to track the execution of the tools in the langsmith dashboard.
+print("Initializing Components...")
 
+embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001")
+llm = ChatGoogleGenerativeAI(
+     model="gemini-2.5-flash",
+     temperature=0
+)
+vector_store = PineconeVectorStore(
+    index_name=os.getenv("INDEX_NAME"),
+    embedding=embeddings
+)
+retriever = vector_store.as_retriever(search_kwargs={"k": 3})
 
-@traceable(run_type = "tool")
-def get_product_price(product:str) -> float:
-    """Look up the price of a product in the catalog.
+prompt_template = ChatPromptTemplate.from_template(
+    """Answer the question based on the following context:
     
-    args:
-        product: The name of the product to look up.
-    returns:
-        The price of the product.
+    {context}
+    
+    Question: {question}
+    
+    Provide a detailed answer:
     """
-    print(f"    >> Executing the get_product_price(product = '{product}')")
-    prices = {
-        "laptop":1299.99,
-        "headphones": 149.95,
-        "keyboard": 89.50
-    }
-    return prices.get(product, 0.0)
+)
 
-@traceable(run_type = "tool")
-def apply_discount(price:float, discount_tier:str) -> float:
-    """Apply a discount to a price based on the discount tier and return the final price.
-    
-    args:
-        price: The original price of the product.
-        discount_tier: Available tiers ("bronze" "silver", "gold").
-    returns:
-        The discounted price of the product.
+def format_docs(docs):
+    """Format retrieved documents into a single string."""  
+    return "\n\n".join(doc.page_content for doc in docs)
+
+def retrieval_chain_without_lcel(query):
     """
-    price = float(price)
-    print(f"    >> Executing the apply_discount(price = {price}, discount_tier = '{discount_tier}')")
-    discounts = {
-        "silver": 12,
-        "gold": 23,
-        "bronze": 5
-    }
-    discount_rate = discounts.get(discount_tier, 0.0)
-    return round(price * (1 - discount_rate / 100), 2)
-
-tools = {
-    "get_product_price": get_product_price,
-    "apply_discount": apply_discount
-}
-
-def get_tool_descriptions(tools_dict):
-    descriptions = []
-    for tool_name, tool_function in tools_dict.items():
-        # __wrapped__ attribute is used to access the original function wrapped by the decorator.
-        original_function = getattr(tool_function, "__wrapped__", tool_function)
-        signature = inspect.signature(original_function)
-        docstring = inspect.getdoc(original_function) or ""
-        descriptions.append(f"{tool_name}{signature}- {docstring}")
-    return "\n".join(descriptions)
-
-tool_descriptions = get_tool_descriptions(tools)
-tool_names = ", ".join(tools.keys())
-
-
-react_prompt = f"""
-STRICT RULES — you must follow these exactly:
-1. NEVER guess or assume any product price. You MUST call get_product_price first to get the real price.
-2. Only call apply_discount AFTER you have received a price from get_product_price. Pass the exact price returned by get_product_price — do NOT pass a made-up number.
-3. NEVER calculate discounts yourself using math. Always use the apply_discount tool.
-4. If the user does not specify a discount tier, ask them which tier to use — do NOT assume one.
-
-Answer the following questions as best you can. You have access to the following tools:
-
-{tool_descriptions}
-
-Use the following format:
-
-Question: the input question you must answer
-Thought: you should always think about what to do
-Action: the action to take, should be one of [{tool_names}]
-Action Input: the input to the action, as comma separated values
-Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can repeat N times)
-Thought: I now know the final answer
-Final Answer: the final answer to the original input question
-
-Begin!
-
-Question: {{question}}
-Thought:"""
-
-# Without langchain, we have to manually trace the LLM calls.
-@traceable(name="Ollama Chat", run_type = "llm")
-def ollama_chat_traced(model, messages, options):
-    return ollama.chat(model = model, messages = messages, options = options)
-
-# _______AGENT LOOP _________
-@traceable(name = "Ollama agent loop")
-def run_agent(question: str):
-    print(f"Question: {question}")
-    print("="*60)
-    prompt = react_prompt.format(question=question)
-    scratchpad = ""
+    Simple retrieval chain without LCEL.
+    Manually retrieves documents, formats them, and generates a response.
     
-    for iteration in range(1,MAX_ITERATIONS + 1):
-        print(f"--- Iteration {iteration} ---")
-        full_prompt = prompt + scratchpad
-        response = ollama_chat_traced(
-            model = MODEL,
-            messages = [{"role":"user", "content":full_prompt}],
-            options = {"stop":["\nObservation"], "temperature": 0.0}
+    Limitations:
+    -Manual step by step execution
+    -No built-in streaming support
+    -No async support without external code
+    -Harder to compose with other chains or tools
+    -More verbose and error-prone
+    """
+    #Step 1: Retrieve relevant documents
+    docs = retriever.invoke(query) #Invokes the retriever with the query to fetch relevant documents from the vector store. The retriever uses the embeddings to find documents that are semantically similar to the query, returning a list of Document objects that contain the text content and metadata of the retrieved documents.
+    
+    #Step 2: Format the retrieved documents into a single string
+    context = format_docs(docs) #Creates a single string that combines the content of all retrieved documents. This formatted context will be used as input to the LLM to provide relevant information for answering the query.
+    
+    #Step 3: Create a prompt with the context and the original query
+    messages = prompt_template.format_messages(context=context, question=query) # Generates a list of messages that will be sent to the LLM. The prompt template is filled with the formatted context and the original query, creating a structured input that guides the LLM in generating a relevant and detailed response.
+    
+    #Step 4: Invoke the LLM with the formatted prompt to generate a response
+    response = llm.invoke(messages) #Invokes the LLM with the structured messages to generate a response. The LLM processes the input, taking into account the context provided by the retrieved documents and the original query, and produces a detailed answer based on its understanding of the information.
+    
+    #Step 5: Return the generated response
+    return response.content
+
+def retrieval_chain_with_lcel():
+    """
+    Creates a retrieval chain using LCEL (LangChain Expression Language).
+    Returns a chain that can be invoked with {"question":"...."}
+    
+    Advantages over non_LCEL approach:
+    -Declarative and composable: Easy to chain operations with pipe operator (|)
+    -Built-in streaming support: chain.stream() works out of the box
+    -Built-in async support: chain.ainvoke() and chain.astream() available
+    -Batch processing: chain.batch() and chain.abatch() for multiple inputs
+    -Type safety: Better integration with Langchain's type system
+    -Less code: More concise and readable
+    -Reusable:Chain can be saved, shared, and composed with other chains
+    -Better debugging: LangChain provides better observability and debugging tools.
+    """
+    retrieval_chain = (
+        RunnablePassthrough.assign(
+            context = itemgetter("question") | retriever | format_docs #assigns context and keeps question unchanged for later use in the prompt. The context is generated by retrieving relevant documents based on the question and formatting them into a single string.
         )
-        output = response.message.content
-        print(f"LLM Output:\n{output}")
-        
-        print(f"[Parsing] Looking for final answer in LLM output")
-        final_answer_match = re.search(r"Final Answer:\s*(.+)", output)
-        if final_answer_match:
-            final_answer = final_answer_match.group(1).strip()
-            print(f"[Parsed] Final Answer found: {final_answer}")
-            print("\n"+"="*60)
-            print(f"Final Answer: {final_answer}")
-            return final_answer
-        
-        # Parse tool calls from raw text using regex- fragile if LLM doesn't follow format.
-        print(f"[Parsing] Looking for tool calls in LLM output")
-        action_match = re.search(r"Action:\s*(.+)", output)
-        action_input_match = re.search(r"Action Input:\s*(.+)", output)
-       
-        if(not action_match or not action_input_match):
-           print(f"[Parsing] No tool calls found in LLM output. Stopping agent.")
-           break
-        
-        tool_name = action_match.group(1).strip()
-        tool_input_raw = action_input_match.group(1).strip()
-        
-        print(f"  [Tool selected]: {tool_name} with args: {tool_input_raw}")
-        # Split comma separated args strip key= prefix if LLM outputs key=value format. Very fragile if LLM doesn't follow format.
-        raw_args = [x.strip() for x in tool_input_raw.split(",")]
-        args = [x.split("=",1)[-1].strip().strip("'\"") for x in raw_args]
-        
-        print(f"[Tool Executing] {tool_name}({args})...")
-        
-        if tool_name not in tools:
-            observation = f"Error:Tool '{tool_name}' not found. Available tools: {list[str](tools.keys())}"
-        else:
-            observation = str(tools[tool_name](*args))
-            
-        print(f" Tool Result: {observation}")
-        
-        # History is one growing string re-sent every iteration(replaces messages.append)
-        scratchpad += f"{output}\nObservation: {observation}\nThought:"
-       
-    print("ERROR: Max iterations reached without a final answer.")
-    return None
-        
-        
-
+        |
+        prompt_template |
+        llm |
+        StrOutputParser()
+    )
+    
+    return retrieval_chain
+    
+    
 
 if __name__ == "__main__":
-    print("Hello langchain Agent(.bind_tools)!")
-    print()
-    result = run_agent("What is the price of a laptop after applying a gold discount?")
-    print(result)
+    print("Retrieving documents... ")
+    
+    #Query
+    query = "What is Pinecone in machine learning?"
+    
+    #Option 0 (No RAG)
+    print("\n" + "="*70)
+    print("IMPLEMENTATION 0: Raw LLM Invocation (No RAG)")
+    print("="*70)
+    result_raw = llm.invoke([HumanMessage(content=query)]) #Without RAG, we directly invoke the LLM with the query. 
+    #The LLM generates a response based solely on its pre-trained knowledge, without any external context or documents.
+    print("\nAnswer:")
+    print(result_raw.content)
+    
+    #Option 1 (RAG without LCEL)
+    print("\n" + "="*70)
+    print("IMPLEMENTATION 1: RAG without LCEL")
+    print("="*70)
+    result_without_lcel = retrieval_chain_without_lcel(query)
+    print("\nAnswer:")
+    print(result_without_lcel)
+    
+    #Option 2 (RAG with LCEL(Langchain Expression Language))
+    print("\n" + "="*70)
+    print("IMPLEMENTATION 2: RAG with LCEL (better approach)")
+    print("="*70)
+    print("Why lcel is better:")
+    print("-More concise and declarative")
+    print("-Built-in streaming support: chain.stream()")
+    print("-Built-in async support: chain.ainvoke()")
+    print("-Easy to compose with other chains or tools")
+    print("-Better for production use")
+    print("="*70)
+    chain_with_lcel = retrieval_chain_with_lcel()
+    result_with_lcel = chain_with_lcel.invoke({"question": query})
+    print("\nAnswer:")
+    print(result_with_lcel)
