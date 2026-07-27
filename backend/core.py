@@ -23,6 +23,7 @@ vectorstore = PineconeVectorStore(
 #Initiate chat model
 model = init_chat_model(model="gemini-2.5-flash",model_provider="google_genai")
 
+#LangChain tool, automatically traced
 @tool(response_format="content_and_artifact")
 def retrieve_context(query:str):
     """Retrieve relevant documentation to help answer user queries about langchain."""
@@ -59,7 +60,7 @@ def run_llm(query:str)->Dict[str,Any]:
         "Always cite the sources you use in your answers."
         "If you cannot find the answer in the retrieved documentation then say so."
     )
-    
+    #LangGraph
     agent = create_agent(model, tools=[retrieve_context], system_prompt=system_prompt)
     
     #Build message list
