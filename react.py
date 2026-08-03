@@ -12,6 +12,6 @@ def triple(num:float)->float:
     """
     return 3*float(num)
 
-tools = [TavilySearch(max_results=1),triple]
+tools = [TavilySearch(max_results=1),triple] #tavily search tool and a custom tool to triple a number.
 
-llm = ChatGoogleGenerativeAI(model="gemini-3.1-pro-preview", temperature = 0).bind_tools(tools)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature = 0).bind_tools(tools) #llm binded with the tools.
