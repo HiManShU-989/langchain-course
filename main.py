@@ -1,7 +1,6 @@
-from dotenv import load_dotenv
-load_dotenv()
-    
+def main():
+    print("Reflexion agent")
 
 
 if __name__ == "__main__":
-    print("Hello from langchain-course!")
+    main()
