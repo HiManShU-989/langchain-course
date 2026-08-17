@@ -13,15 +13,17 @@ urls = [
     "https://lilianweng.github.io/posts/2023-10-25-adv-attack-llm/",
 ]
 
-# FIX: Pass the entire 'urls' list to a single WebBaseLoader.
+# Pass the entire 'urls' list to a single WebBaseLoader.
 # This automatically returns a flat list of Documents: [Doc1, Doc2, Doc3]
 docs = (WebBaseLoader(web_paths=urls)).load()
 
+# Preparing the text splitter
 text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
     chunk_size = 250,
     chunk_overlap = 0
 )
 
+#Splitting the docs obtained from url int0 chunks
 doc_lists = text_splitter.split_documents(docs)
 
 # embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001")
@@ -45,4 +47,3 @@ retriever = Chroma(
     collection_name="rag-chroma",
     persist_directory="./.chroma"
     ).as_retriever() #Makes it as a langchain retriever for doing similarity search etc.
-
