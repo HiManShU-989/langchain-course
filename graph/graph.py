@@ -6,6 +6,18 @@ from graph.state import GraphState
 from graph.nodes import generate, grade_documents, retrieve, web_search
 from graph.chains.answer_grader import answer_grader
 from graph.chains.hallucination_grader import hallucination_grader
+from graph.chains.router import question_router, RouteQuery
+
+def route_question(state: GraphState):
+    print("---ROUTE QUESTION---")
+    question = state["question"]
+    source: RouteQuery = question_router.invoke({"question":question})
+    if source.datasource == "websearch":
+        print("---ROUTE QUESTION TO WEBSEARCH---")
+        return WEBSEARCH
+    elif source.datasource == "vectorstore":
+        print("---ROUTE QUESTION TO RAG---")
+        return RETRIEVE
 
 def decide_to_generate(state: GraphState):
     print("--ASSESS GRADED DOCUMENTS--")
@@ -47,7 +59,11 @@ workflow.add_node(GRADEDOCUMENTS, grade_documents)
 workflow.add_node(GENERATE, generate)
 workflow.add_node(WEBSEARCH, web_search)
 
-workflow.set_entry_point(RETRIEVE)
+# workflow.set_entry_point(RETRIEVE)
+workflow.set_conditional_entry_point(route_question, path_map={
+    WEBSEARCH: WEBSEARCH,
+    RETRIEVE: RETRIEVE
+})
 workflow.add_edge(RETRIEVE, GRADEDOCUMENTS)
 workflow.add_conditional_edges(GRADEDOCUMENTS, decide_to_generate, path_map={
     WEBSEARCH: WEBSEARCH,
